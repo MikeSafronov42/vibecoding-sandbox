@@ -14,41 +14,25 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Each rule: (severity, name, regex, description)
 RULES = [
-    ("HIGH", "ssh_key_read",
-     r"(\.ssh/|/\.ssh/|~/\.ssh)",
-     "Attempt to access SSH credentials"),
-    ("HIGH", "shadow_read",
-     r"/etc/shadow",
-     "Attempt to read /etc/shadow"),
-    ("MEDIUM", "passwd_read",
-     r"/etc/passwd",
-     "Read of /etc/passwd (often used as injection sentinel)"),
-    ("MEDIUM", "bashrc_read",
-     r"~/\.bashrc|/\.bashrc|\.bash_history",
-     "Access to shell init or history files"),
-    ("HIGH", "cloud_creds",
-     r"~/\.aws|~/\.config/gcloud|~/\.kube|~/\.docker/config",
-     "Access to cloud or container credentials"),
-    ("HIGH", "system_write",
-     r">\s*/etc/|>\s*/usr/|>\s*/var/(?!tmp)",
-     "Write attempt to system directories"),
-    ("MEDIUM", "pip_install",
-     r"\bpip\d?\s+install\b",
-     "Package installation (potential supply chain)"),
-    ("MEDIUM", "curl_external",
-     r"\b(curl|wget)\b\s+[^|]*https?://(?!host\.docker\.internal|localhost|127\.)",
-     "Network fetch to non-local host"),
-    ("HIGH", "priv_escalation",
-     r"\b(sudo|su)\b|chmod\s+\+s|setuid",
-     "Privilege escalation attempt"),
-    ("HIGH", "command_substitution",
-     r"\$\(|`",
-     "Shell command substitution (blocked elsewhere; flagging for telemetry)"),
-    ("LOW", "env_dump",
-     r"\benv\b|printenv|/proc/self/environ",
-     "Environment variable enumeration"),
+    ("HIGH", "ssh_key_read", r"(\.ssh/|/\.ssh/|~/\.ssh)", "Attempt to access SSH credentials"),
+    ("HIGH", "shadow_read", r"/etc/shadow", "Attempt to read /etc/shadow"),
+    ("MEDIUM", "passwd_read", r"/etc/passwd", "Read of /etc/passwd"),
+    ("MEDIUM", "bashrc_read", r"~/\.bashrc|/\.bashrc|\.bash_history", "Access to shell init or history files"),
+    ("HIGH", "cloud_creds", r"~/\.aws|~/\.config/gcloud|~/\.kube|~/\.docker/config", "Access to cloud credentials"),
+    ("HIGH", "system_write", r">\s*/etc/|>\s*/usr/|>\s*/var/(?!tmp)", "Write attempt to system directories"),
+    ("MEDIUM", "pip_install", r"\bpip\d?\s+install\b", "Package installation (potential supply chain)"),
+    ("LOW", "typosquat_packages", r"\bpip\s+install\s+(reqeusts|urllib33|bs44)\b", "Known malicious typosquatted package requested"),
+    ("MEDIUM", "curl_external", r"\b(curl|wget)\b\s+[^|]*https?://(?!host\.docker\.internal|localhost|127\.)", "Network fetch to non-local host"),
+    ("HIGH", "priv_escalation", r"\b(sudo|su)\b|chmod\s+\+s|setuid", "Privilege escalation attempt via shell"),
+    ("HIGH", "programmatic_privesc", r"os\.setuid|os\.setgid|ctypes|pty\.spawn", "Programmatic root escalation or interactive shell"),
+    ("HIGH", "exploit_compilation", r"\b(gcc|g\+\+|clang|make)\b.*-o", "Attempt to compile potential binary exploit"),
+    ("HIGH", "command_substitution", r"\$\(|`", "Shell command substitution"),
+    ("LOW", "env_dump", r"\benv\b|printenv|/proc/self/environ", "Environment variable enumeration"),
+    ("HIGH", "docker_escape", r"--privileged|-v\s+/(var/run/docker\.sock|proc|sys)", "Attempt to escape container or acquire root via Docker socket"),
+    ("HIGH", "reverse_shell", r"bash\s+-i|nc\s+-e|/dev/tcp/", "Reverse shell signature detected"),
+    ("MEDIUM", "reconnaissance", r"find\s+/\s+-name|grep\s+-r.*/etc|ls\s+-la\s+/root", "System-wide reconnaissance and scanning"),
+    ("HIGH", "persistence_cron", r"crontab|/etc/cron|systemctl|service|update-rc\.d", "Attempt to establish persistence via cron or system services"),
 ]
 
 def detect(cmd: str):
@@ -64,7 +48,6 @@ def main():
 
     hits = detect(cmd)
 
-    # Extra contextual rule: any network attempt when network is off
     if not network_enabled and re.search(r"\b(curl|wget|nc|nslookup|dig)\b", cmd):
         hits.append({
             "severity": "LOW",
@@ -75,7 +58,6 @@ def main():
     if not hits:
         return
 
-    # Print human-visible warning
     print("", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     print("  SANDBOX BOUNDARY-VIOLATION WARNING", file=sys.stderr)
@@ -85,7 +67,6 @@ def main():
     print("=" * 60, file=sys.stderr)
     print("", file=sys.stderr)
 
-    # Structured log line
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "command": cmd,

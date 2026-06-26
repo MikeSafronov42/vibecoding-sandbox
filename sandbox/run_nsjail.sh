@@ -24,21 +24,16 @@ done
 
 CMD="$*"
 
-# Boundary-violation detection (advisory, does not block execution)
 SANDBOX_NETWORK="${NET_FLAG_VALUE}" echo "${CMD}" | python3 "${REPO_DIR}/sandbox/detect.py" || true
 
-# Booting the container using the secure user-space gVisor kernel
 docker run --rm -i \
-    --runtime=runsc-gpu \
-    --device /dev/nvidia0 \
-    --device /dev/nvidiactl \
-    --device /dev/nvidia-uvm \
     ${NETWORK_FLAG} \
     "${EXTRA_FLAGS[@]}" \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
-    --memory=2g \
-    --cpus=2 \
+    --read-only \
+    --memory=512m \
+    --cpus=1 \
     -v "${REPO_DIR}/output:/output" \
     -v "${REPO_DIR}/workspace:/workspace" \
     aisandbox:v1 \
