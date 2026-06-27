@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-ARG USER_UID=1000
-ARG USER_GID=1000
+ARG USER_UID=1007
+ARG USER_GID=1006
 
 # Create a non-root user matching the host UID/GID
 RUN groupadd -g ${USER_GID} agent && \

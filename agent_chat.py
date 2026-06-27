@@ -20,6 +20,13 @@ OUTPUT = REPO / "output"
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
+# Cloud-provider model lists (also referenced by demo_app.py)
+PROVIDER_MODELS = {
+    "ollama":    ["qwen2.5-coder:7b", "deepseek-coder:6.7b", "gemma4:e4b", "qwen3.5:9b"],
+    "anthropic": ["claude-sonnet-4-5", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+    "openai":    ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
+}
+
 SYSTEM_PROMPT = """You are a coding agent operating inside a SECURITY-CONSTRAINED sandbox.
 
 Every command you propose is screened. HIGH-severity attempts
@@ -137,7 +144,20 @@ def parse_tags(text: str) -> List[Dict]:
         results.append({"tag": tag, "attrs": attrs, "body": body.strip()})
     return results
 
-def get_model_response(messages: List[Dict], model: str) -> str:
+def get_model_response(messages: List[Dict], model: str, provider: str = "ollama", api_key: str = "") -> str:
+    """Dispatch to the appropriate LLM backend.
+
+    provider  ollama (default) | anthropic | openai
+    api_key   required for anthropic / openai; ignored for ollama
+    """
+    if provider == "anthropic":
+        return _get_response_anthropic(messages, model, api_key)
+    if provider == "openai":
+        return _get_response_openai(messages, model, api_key)
+    return _get_response_ollama(messages, model)
+
+
+def _get_response_ollama(messages: List[Dict], model: str) -> str:
     full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     try:
         resp = requests.post(
@@ -152,8 +172,49 @@ def get_model_response(messages: List[Dict], model: str) -> str:
     except Exception as e:
         return f"<done>Connection Error: {str(e)}</done>"
 
-def handle_assistant_turn(messages: List[Dict], model: str, sandbox_script: Path, block_severity: str = "HIGH") -> Dict:
-    reply = get_model_response(messages, model)
+
+def _get_response_anthropic(messages: List[Dict], model: str, api_key: str) -> str:
+    try:
+        import anthropic as _anthropic_sdk  # installed via requirements.txt
+        client = _anthropic_sdk.Anthropic(api_key=api_key or None)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            messages=messages,
+            temperature=0.2,
+        )
+        return resp.content[0].text
+    except ImportError:
+        return "<done>anthropic package not installed. Run: pip install anthropic</done>"
+    except Exception as e:
+        return f"<done>Anthropic API Error: {e}</done>"
+
+
+def _get_response_openai(messages: List[Dict], model: str, api_key: str) -> str:
+    full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": full_messages, "temperature": 0.2},
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            return f"<done>OpenAI API Error: {resp.status_code} — {resp.text[:300]}</done>"
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"<done>OpenAI Error: {e}</done>"
+
+def handle_assistant_turn(
+    messages: List[Dict],
+    model: str,
+    sandbox_script: Path,
+    block_severity: str = "HIGH",
+    provider: str = "ollama",
+    api_key: str = "",
+) -> Dict:
+    reply = get_model_response(messages, model, provider=provider, api_key=api_key)
     tags = parse_tags(reply)
     
     if not tags:

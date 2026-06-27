@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 import streamlit as st
 import agent_chat
+import opencode_agent
 
 REPO = Path(__file__).resolve().parent
 RUN_SH = REPO / "sandbox" / "run.sh"
@@ -111,60 +112,105 @@ st.markdown("""
 
 with st.sidebar:
     st.markdown("### 🎛️ Architecture Config")
-    
-    model_choice = st.selectbox(
-        "🧠 Local Model (Ollama)",
-        [
-            "qwen2.5-coder:7b", 
-            "deepseek-coder:6.7b", 
-            "gemma4:e4b", 
-            "qwen3.5:9b"
-        ],
+
+    # --- Agent backend ---
+    agent_type = st.selectbox(
+        "Agent Backend",
+        ["Vibeguard Native", "OpenCode (Sandboxed)"],
         index=0,
-        help="Inference engine running entirely locally."
+        help=(
+            "Vibeguard Native uses an LLM directly with tag-based tool calls.\n\n"
+            "OpenCode runs the opencode CLI *inside* the Docker sandbox — "
+            "its file and shell operations are fully container-isolated."
+        ),
     )
-    
+
+    # --- Provider + model (shared by both backends) ---
+    PROVIDER_LABELS = {
+        "Ollama (Local)": "ollama",
+        "Anthropic Claude": "anthropic",
+        "OpenAI GPT": "openai",
+    }
+    provider_label = st.selectbox(
+        "AI Provider",
+        list(PROVIDER_LABELS.keys()),
+        index=0,
+        help="Ollama runs locally; Anthropic/OpenAI require an API key.",
+    )
+    provider_key = PROVIDER_LABELS[provider_label]
+
+    _live_models = opencode_agent.get_provider_models()
+    model_choice = st.selectbox(
+        "Model",
+        _live_models.get(provider_key, []),
+        index=0,
+    )
+
+    api_key = ""
+    if provider_key in ("anthropic", "openai"):
+        api_key = st.text_input(
+            f"{provider_label} API Key",
+            type="password",
+            help="Stored only in session state, never written to disk.",
+        )
+
+    st.markdown("---")
+
+    # --- Sandbox runtime (for Vibeguard Native code execution) ---
     runtime_env = st.selectbox(
-        "🛡️ Sandbox Runtime",
+        "Code-Exec Sandbox",
         ["Standard Docker (runc)", "gVisor Sandbox (runsc)", "nsjail Sandbox (Lightweight)"],
         index=0,
-        help="Execution isolation layer."
+        help="Isolation layer for code run by the Vibeguard Native agent (or the Live/Attack tabs).",
     )
-    
+
     block_severity = st.selectbox(
-        "🛑 Block threshold",
+        "Block threshold",
         ["HIGH", "MEDIUM", "LOW"],
         index=0,
-        help="Commands matching this severity or higher are refused."
+        help="Commands matching this severity or higher are refused by Vibeguard Native.",
     )
-    
+
+    if agent_type == "OpenCode (Sandboxed)":
+        oc_img_ok = opencode_agent.image_exists()
+        if oc_img_ok:
+            st.success("`aisandbox-opencode:v1` image ready")
+        else:
+            st.warning(
+                "OpenCode image not built yet.\n\n"
+                "```bash\ndocker build -t aisandbox-opencode:v1 \\\n"
+                "  -f sandbox/Dockerfile.opencode sandbox/\n```"
+            )
+
     st.markdown("---")
-    if st.button("🗑️ Clear conversation"):
+    if st.button("Clear conversation"):
         st.session_state.chat_messages = []
         st.session_state.chat_log = []
         st.rerun()
 
 if runtime_env == "Standard Docker (runc)":
     ACTIVE_RUN_SCRIPT = RUN_SH
-    runtime_badge = "🐳 Engine: Docker (runc)"
+    runtime_badge = "Engine: Docker (runc)"
 elif runtime_env == "gVisor Sandbox (runsc)":
     ACTIVE_RUN_SCRIPT = RUN_GVISOR_SH
-    runtime_badge = "🛡️ Engine: gVisor (runsc)"
+    runtime_badge = "Engine: gVisor (runsc)"
 else:
     ACTIVE_RUN_SCRIPT = RUN_NSJAIL_SH
-    runtime_badge = "🪶 Engine: nsjail"
+    runtime_badge = "Engine: nsjail"
 
 import datetime as _dt
 _now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+agent_badge = "OpenCode (Sandboxed)" if agent_type == "OpenCode (Sandboxed)" else "🤖 Vibeguard Native"
+provider_badge = f"{provider_label}: {model_choice}"
 st.markdown(f"""
 <div class="header-banner">
     <h1>🛡️ AI Coding Agent Sandbox</h1>
     <p>Docker-based safe execution + boundary-violation detection + defense-in-depth dashboard</p>
     <div class="status-row">
         <span class="status-pill">{runtime_badge}</span>
-        <span class="status-pill">🤖 Agent: Vibeguard Native</span>
-        <span class="status-pill">🧠 Model: {model_choice}</span>
-        <span class="status-pill">📊 Session: {_now}</span>
+        <span class="status-pill">{agent_badge}</span>
+        <span class="status-pill">{provider_badge}</span>
+        <span class="status-pill">Session: {_now}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -201,16 +247,16 @@ def docker_image_exists(name="aisandbox:v1"):
 
 def render_violations(new_violations):
     if not new_violations:
-        st.info("ℹ️ No detector rules matched (the command may still have failed inside the container)")
+        st.info("No detector rules matched (the command may still have failed inside the container)")
         return
-    st.error("🚨 BOUNDARY VIOLATION DETECTED")
+    st.error("BOUNDARY VIOLATION DETECTED")
     for v in new_violations:
         for hit in v["violations"]:
             emoji = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(hit["severity"], "⚪")
             st.markdown(f"{emoji} **[{hit['severity']}] {hit['rule']}** — {hit['description']}")
 
 tab_overview, tab_benign, tab_attacks, tab_live, tab_chat = st.tabs(
-    ["🏠 Overview", "✅ Benign task", "🎯 Pre-built attacks", "🔬 Live sandbox", "🤖 Chat with agent"]
+    ["Overview", "Benign task", "Pre-built attacks", "Live sandbox", "Chat with agent"]
 )
 
 with tab_overview:
@@ -218,9 +264,9 @@ with tab_overview:
     col_a, col_b = st.columns(2)
     with col_a:
         if docker_image_exists():
-            st.success("✅ Docker image `aisandbox:v1` is built and available")
+            st.success("Docker image `aisandbox:v1` is built and available")
         else:
-            st.error("❌ Docker image missing — run `docker build -t aisandbox:v1 sandbox/`")
+            st.error("Docker image missing — run `docker build -t aisandbox:v1 sandbox/`")
         st.markdown(f"- **Active Wrapper:** `{ACTIVE_RUN_SCRIPT.relative_to(REPO)}`")
         st.markdown(f"- **Dockerfile:** `{DOCKERFILE.relative_to(REPO)}`")
         st.markdown(f"- **Detector:** `{DETECT_PY.relative_to(REPO)}`")
@@ -271,7 +317,6 @@ with tab_overview:
                     "Command": entry["command"][:80] + ("…" if len(entry["command"]) > 80 else ""),
                     "Network": "yes" if entry.get("network_enabled") else "no",
                 })
-        # UPDATE: Replaced use_container_width with width="stretch" per Streamlit deprecation warning
         st.dataframe(rows, width="stretch", hide_index=True)
 
 with tab_benign:
@@ -281,9 +326,9 @@ with tab_benign:
         with st.spinner("Running script in sandbox..."):
             stdout, stderr, rc = run_in_sandbox("python /workspace/weather_solution.py", network=True)
         if rc == 0:
-            st.success(f"✅ Exit code {rc}. Sandbox executed the agent's code successfully.")
+            st.success(f"Exit code {rc}. Sandbox executed the agent's code successfully.")
         else:
-            st.warning(f"⚠️ Exit code {rc}. See stderr below.")
+            st.warning(f"Exit code {rc}. See stderr below.")
         if stdout.strip(): st.code(stdout, language="text")
         if stderr.strip(): st.code(stderr, language="text")
 
@@ -291,7 +336,6 @@ with tab_benign:
         if report.exists():
             st.markdown(f"**Output file:** `output/{report.name}` ({report.stat().st_size} bytes)")
             with st.expander("Rendered HTML output", expanded=True):
-                # UPDATE: Replaced st.components.v1.html with st.html per Streamlit deprecation warning
                 st.html(report.read_text())
 
 with tab_attacks:
@@ -346,34 +390,34 @@ with tab_attacks:
 
         st.markdown("**Containment check:**")
         if scenario == "Docker root escape attempt":
-            st.success("✅ Container dropped capabilities and lacks socket access; escape thwarted")
+            st.success("Container dropped capabilities and lacks socket access; escape thwarted")
         elif scenario == "Programmatic root escalation (Python)":
-            st.success("✅ Python os.setuid(0) failed. Kernel explicitly blocked privilege elevation (no-new-privileges).")
+            st.success("Python os.setuid(0) failed. Kernel explicitly blocked privilege elevation (no-new-privileges).")
         elif scenario == "Resource exhaustion (Fork Bomb)":
-            st.success("✅ PID limits and cgroups contained the fork bomb. Host remains stable.")
+            st.success("PID limits and cgroups contained the fork bomb. Host remains stable.")
         elif scenario == "Network exfiltration (curl data leak)":
-            st.success("✅ External network block or DNS failure prevented data transmission.")
+            st.success("External network block or DNS failure prevented data transmission.")
         elif scenario == "Reverse shell connection attempt":
-            st.success("✅ No netcat/bash TCP bridging allowed outward. Shell execution failed.")
+            st.success("No netcat/bash TCP bridging allowed outward. Shell execution failed.")
         elif scenario == "Environment variable enumeration":
             dump = OUTPUT_DIR / "env_dump.txt"
             if dump.exists() and len(dump.read_text().strip()) > 0:
-                st.warning("⚠️ Environment dumped, but it only contains safe, minimal container variables.")
+                st.warning("Environment dumped, but it only contains safe, minimal container variables.")
             else:
-                st.success("✅ Environment enumeration blocked or resulted in empty output.")
+                st.success("Environment enumeration blocked or resulted in empty output.")
         else:
             leak = OUTPUT_DIR / "leaked_keys.txt"
             if scenario.startswith("SSH"):
                 if leak.exists() and leak.read_text().strip():
-                    st.error(f"❌ LEAK: `output/leaked_keys.txt` has data — investigate!")
+                    st.error(f"LEAK: `output/leaked_keys.txt` has data — investigate!")
                 else:
-                    st.success("✅ `output/leaked_keys.txt` is empty or missing — sandbox blocked the key read")
+                    st.success("`output/leaked_keys.txt` is empty or missing — sandbox blocked the key read")
             elif scenario == "System file write attempt":
-                st.success("✅ Container's /etc is isolated from host; nothing written to your real /etc")
+                st.success("Container's /etc is isolated from host; nothing written to your real /etc")
             elif scenario.startswith("Privilege"):
-                st.success("✅ Container runs as non-root with --cap-drop=ALL; sudo has no effect")
+                st.success("Container runs as non-root with --cap-drop=ALL; sudo has no effect")
             else:
-                st.success("✅ Anything pip installed lives only in the ephemeral container, destroyed on exit")
+                st.success("Anything pip installed lives only in the ephemeral container, destroyed on exit")
 
 with tab_live:
     st.header("Live: type any command")
@@ -399,11 +443,22 @@ with tab_live:
             st.code(stderr, language="text")
 
 with tab_chat:
-    st.header("Chat with the AI agent (sandboxed + enforced)")
-    
+    if agent_type == "OpenCode (Sandboxed)":
+        st.header("Chat with OpenCode (Docker-sandboxed)")
+        st.markdown(
+            f"OpenCode runs **inside** `aisandbox-opencode:v1`. "
+            f"All file writes and shell commands are container-isolated. "
+            f"Provider: **{provider_label}** · Model: **{model_choice}**"
+        )
+    else:
+        st.header("Chat with the AI agent (sandboxed + enforced)")
+        st.markdown(
+            f"Vibeguard Native agent with tag-based tool protocol. "
+            f"Provider: **{provider_label}** · Model: **{model_choice}**"
+        )
+
     with st.expander("Settings", expanded=False):
-        block_severity = st.selectbox("Block threshold", ["HIGH", "MEDIUM", "LOW"], index=0, key="chat_block")
-        if st.button("🗑️ Clear conversation", key="chat_clear"):
+        if st.button("Clear conversation", key="chat_clear"):
             st.session_state.chat_messages = []
             st.session_state.chat_log = []
             st.rerun()
@@ -413,76 +468,117 @@ with tab_chat:
     if "chat_log" not in st.session_state:
         st.session_state.chat_log = []
 
+    # --- Render history ---
     for entry in st.session_state.chat_log:
         with st.chat_message(entry["role"]):
             if entry["role"] == "user":
                 st.markdown(entry["content"])
+            elif entry.get("backend") == "opencode":
+                # OpenCode result rendering
+                result = entry.get("result", {})
+                if result.get("ok"):
+                    st.success(f"OpenCode completed (exit 0)")
+                else:
+                    st.warning(f"OpenCode exit {result.get('returncode', '?')}")
+                if result.get("summary"):
+                    st.markdown(result["summary"])
+                if result.get("tool_calls"):
+                    with st.expander(f"🔧 Tool calls ({len(result['tool_calls'])})"):
+                        for tc in result["tool_calls"]:
+                            st.json(tc)
+                if result.get("stderr", "").strip():
+                    with st.expander("stderr"):
+                        st.code(result["stderr"])
             else:
+                # Vibeguard Native rendering
                 if entry.get("assistant_text"):
                     st.markdown("**Model reply:**")
                     st.code(entry["assistant_text"], language="xml")
                 action_kind = entry.get("action_kind")
                 result = entry.get("result", {})
-                
+
                 if action_kind == "write":
                     if result.get("ok"): st.success(f"✏️ Wrote file: `{result['path']}`")
-                    else: st.error(f"❌ Write failed: {result.get('error')}")
+                    else: st.error(f"Write failed: {result.get('error')}")
                 elif action_kind == "read":
                     if result.get("ok"):
                         with st.expander("📖 File read"): st.code(result["content"])
-                    else: st.error(f"❌ Read failed: {result.get('error')}")
+                    else: st.error(f"Read failed: {result.get('error')}")
                 elif action_kind == "run":
                     if result.get("blocked"):
-                        st.error("🚫 COMMAND REFUSED by sandbox policy")
+                        st.error("COMMAND REFUSED by sandbox policy")
                         for v in result["violations"]:
                             emoji = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(v["severity"], "⚪")
                             st.markdown(f"{emoji} **[{v['severity']}] {v['rule']}** — {v['description']}")
                     else:
                         rc = result.get("returncode", -1)
-                        net = "🌐 network" if result.get("network") else "🔌 no network"
+                        net = "network" if result.get("network") else "🔌 no network"
                         if result.get("violations"):
-                            st.warning(f"⚠️ Allowed but flagged ({net}, exit {rc})")
+                            st.warning(f"Allowed but flagged ({net}, exit {rc})")
                             for v in result["violations"]:
                                 st.markdown(f"  • [{v['severity']}] {v['rule']}")
                         else:
-                            st.success(f"✅ Executed ({net}, exit {rc})")
+                            st.success(f"Executed ({net}, exit {rc})")
                         st.code(result.get("command", ""), language="bash")
                         if result.get("stdout", "").strip():
                             with st.expander("stdout"): st.code(result["stdout"])
                         if result.get("stderr", "").strip():
                             with st.expander("stderr"): st.code(result["stderr"])
                 elif action_kind == "done":
-                    st.info(f"✅ {result.get('summary', 'Task complete.')}")
+                    st.info(f"{result.get('summary', 'Task complete.')}")
 
+    # --- Input + dispatch ---
     user_prompt = st.chat_input("Ask the agent to do something…")
     if user_prompt:
         st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
         st.session_state.chat_log.append({"role": "user", "content": user_prompt})
 
-        with st.spinner("Agent is thinking and acting..."):
-            for turn_i in range(6):
-                turn = agent_chat.handle_assistant_turn(
-                    messages=st.session_state.chat_messages,
+        if agent_type == "OpenCode (Sandboxed)":
+            # ---- OpenCode path ----
+            with st.spinner("OpenCode is running in the sandbox…"):
+                result = opencode_agent.run_opencode(
+                    prompt=user_prompt,
+                    provider=provider_key,
                     model=model_choice,
-                    sandbox_script=ACTIVE_RUN_SCRIPT,
-                    block_severity=block_severity,
+                    api_key=api_key,
+                    ollama_model=model_choice if provider_key == "ollama" else "qwen2.5-coder:7b",
                 )
-                
-                st.session_state.chat_messages.append({"role": "assistant", "content": turn["assistant_text"]})
-                st.session_state.chat_log.append({
-                    "role": "assistant",
-                    "assistant_text": turn["assistant_text"],
-                    "action_kind": turn["action_kind"],
-                    "result": turn["result"],
-                })
-                
-                if turn["action_kind"] == "done": break
-                if turn["action_kind"] == "none":
-                    st.session_state.chat_messages.append({"role": "user", "content": "Please respond using protocol tags: <run>, <write>, <read>, or <done>."})
-                    continue
-                
-                feedback = agent_chat.format_action_for_model(turn["action_kind"], turn["result"])
-                st.session_state.chat_messages.append({"role": "user", "content": feedback})
+            st.session_state.chat_messages.append({
+                "role": "assistant",
+                "content": result.get("summary", "(no output)"),
+            })
+            st.session_state.chat_log.append({
+                "role": "assistant",
+                "backend": "opencode",
+                "result": result,
+            })
+        else:
+            # ---- Vibeguard Native path ----
+            with st.spinner("Agent is thinking and acting..."):
+                for _turn_i in range(6):
+                    turn = agent_chat.handle_assistant_turn(
+                        messages=st.session_state.chat_messages,
+                        model=model_choice,
+                        sandbox_script=ACTIVE_RUN_SCRIPT,
+                        block_severity=block_severity,
+                        provider=provider_key,
+                        api_key=api_key,
+                    )
+                    st.session_state.chat_messages.append({"role": "assistant", "content": turn["assistant_text"]})
+                    st.session_state.chat_log.append({
+                        "role": "assistant",
+                        "backend": "native",
+                        "assistant_text": turn["assistant_text"],
+                        "action_kind": turn["action_kind"],
+                        "result": turn["result"],
+                    })
+                    if turn["action_kind"] == "done":
+                        break
+                    if turn["action_kind"] == "none":
+                        st.session_state.chat_messages.append({"role": "user", "content": "Please respond using protocol tags: <run>, <write>, <read>, or <done>."})
+                        continue
+                    feedback = agent_chat.format_action_for_model(turn["action_kind"], turn["result"])
+                    st.session_state.chat_messages.append({"role": "user", "content": feedback})
         st.rerun()
 
 with st.sidebar:
