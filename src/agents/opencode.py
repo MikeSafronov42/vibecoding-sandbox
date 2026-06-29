@@ -1,61 +1,47 @@
-"""
-OpenCode agent backend.
+"""OpenCode agent backend.
 
 Drives the opencode CLI *inside* the Docker sandbox so that all file
-operations and shell executions are contained — OpenCode natively has no
-sandbox of its own.
+operations and shell executions are container-isolated. OpenCode has no
+built-in sandbox, so this module provides that boundary.
 
-Supported providers:
-  anthropic  — Claude (requires ANTHROPIC_API_KEY)
-  openai     — GPT / o-series (requires OPENAI_API_KEY)
-  ollama     — any local Ollama model (no API key)
+Supported providers: anthropic | openai | ollama
 """
 import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List
+from typing import Any
 
-import requests as _requests
+import requests
 
-REPO = Path(__file__).resolve().parent
-RUN_OPENCODE_SH = REPO / "sandbox" / "run_opencode.sh"
+from src.config import PROVIDER_MODELS, REPO
 
-_ANTHROPIC_FALLBACK = [
-    "claude-sonnet-4-6",
-    "claude-opus-4-8",
-    "claude-haiku-4-5-20251001",
-]
-_OPENAI_FALLBACK = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"]
-_OLLAMA_FALLBACK = ["qwen2.5-coder:7b", "deepseek-coder:6.7b", "gemma4:e4b", "qwen3.5:9b"]
+RUN_OPENCODE_SH: Path = REPO / "scripts" / "run_opencode.sh"
 
 
-def get_ollama_models(base_url: str = "http://localhost:11434") -> List[str]:
-    """Return model names currently pulled in Ollama, falling back to defaults."""
+def get_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
+    """Return model names currently pulled in Ollama, falling back to the config defaults."""
     try:
-        r = _requests.get(f"{base_url}/api/tags", timeout=3)
+        r = requests.get(f"{base_url}/api/tags", timeout=3)
         if r.status_code == 200:
             names = [m["name"] for m in r.json().get("models", [])]
-            return names if names else _OLLAMA_FALLBACK
+            return names if names else PROVIDER_MODELS["ollama"]
     except Exception:
         pass
-    return _OLLAMA_FALLBACK
+    return PROVIDER_MODELS["ollama"]
 
 
-def get_provider_models() -> Dict[str, List[str]]:
-    """Return the model list for every provider, querying Ollama dynamically."""
+def get_provider_models() -> dict[str, list[str]]:
+    """Return model lists for every provider, querying Ollama dynamically."""
     return {
-        "anthropic": _ANTHROPIC_FALLBACK,
-        "openai": _OPENAI_FALLBACK,
+        "anthropic": PROVIDER_MODELS["anthropic"],
+        "openai": PROVIDER_MODELS["openai"],
         "ollama": get_ollama_models(),
     }
 
 
-# Cached copy used by demo_app.py on import — refreshed each Streamlit rerun
-PROVIDER_MODELS: Dict[str, List[str]] = get_provider_models()
-
-
 def image_exists(name: str = "aisandbox-opencode:v1") -> bool:
+    """Return True if the named Docker image is present on the host."""
     try:
         r = subprocess.run(
             ["docker", "image", "inspect", name],
@@ -74,16 +60,16 @@ def run_opencode(
     api_key: str = "",
     ollama_model: str = "qwen2.5-coder:7b",
     timeout: int = 120,
-) -> Dict:
-    """Run OpenCode in the sandbox and return a structured result dict.
+) -> dict[str, Any]:
+    """Run OpenCode inside the sandbox container and return a structured result.
 
     Returns:
-        ok          bool    — True if opencode exited 0
+        ok          bool  — True if opencode exited 0
         returncode  int
-        summary     str     — assembled assistant text (≤3 000 chars)
-        text_parts  list    — individual text segments from the event stream
-        tool_calls  list    — tool invocations OpenCode made
-        events      list    — raw parsed JSON events (up to 200)
+        summary     str   — assembled assistant text (≤ 3 000 chars)
+        text_parts  list  — individual text segments from the event stream
+        tool_calls  list  — tool invocations OpenCode made
+        events      list  — raw parsed JSON events (up to 200)
         stderr      str
     """
     env = dict(os.environ)
@@ -115,14 +101,11 @@ def run_opencode(
         return _error(str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _parse_output(stdout: str, stderr: str, returncode: int) -> Dict:
-    text_parts: List[str] = []
-    tool_calls: List[Dict] = []
-    events: List[Dict] = []
+def _parse_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
+    """Parse the JSON event stream produced by opencode --format json."""
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
 
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
@@ -135,13 +118,10 @@ def _parse_output(stdout: str, stderr: str, returncode: int) -> Dict:
             ev_type = ev.get("type", "")
             part = ev.get("part", {})
 
-            # OpenCode 1.x event format: type="text" with part.text
             if ev_type == "text" and isinstance(part, dict):
                 t = part.get("text", "")
                 if t:
                     text_parts.append(t)
-
-            # Tool-use events: type="tool_input" / "tool_result" or part.type=="tool-invocation"
             elif ev_type in ("tool_input", "tool_call"):
                 tool_calls.append(ev)
             elif ev_type == "message.part":
@@ -149,8 +129,6 @@ def _parse_output(stdout: str, stderr: str, returncode: int) -> Dict:
                     text_parts.append(part.get("text", ""))
                 elif part.get("type") == "tool-invocation":
                     tool_calls.append(part.get("toolInvocation", {}))
-
-            # Older / alternative shapes
             elif ev_type in ("assistant", "message"):
                 content = ev.get("content", "")
                 if isinstance(content, str) and content:
@@ -159,7 +137,6 @@ def _parse_output(stdout: str, stderr: str, returncode: int) -> Dict:
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
-
         except json.JSONDecodeError:
             if line and not line.startswith("==="):
                 text_parts.append(line)
@@ -178,7 +155,7 @@ def _parse_output(stdout: str, stderr: str, returncode: int) -> Dict:
     }
 
 
-def _error(msg: str) -> Dict:
+def _error(msg: str) -> dict[str, Any]:
     return {
         "ok": False,
         "returncode": -1,

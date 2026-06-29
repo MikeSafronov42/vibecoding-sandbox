@@ -1,10 +1,10 @@
 #!/bin/bash
 # Smoke test for the AI sandbox. Run from the repo root:
-#   ./sandbox/smoke_test.sh
+#   ./scripts/smoke_test.sh
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN="${REPO_DIR}/sandbox/run.sh"
+RUN="${REPO_DIR}/scripts/run.sh"
 PASS=0
 FAIL=0
 
